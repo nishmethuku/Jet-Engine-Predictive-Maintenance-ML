@@ -320,8 +320,10 @@ if lstm is not None:
     st.caption(
         "Primary model: **LSTM** over a 30-cycle window — RMSE 16.19 ± 0.35, "
         "MAE 11.59 ± 0.53, R² 0.850 on unseen engines (mean of 3 environments; "
-        "see docs/reproduction-log.md). Random Forest (RMSE 18.69) serves rows "
-        "with no usable history. RUL capped at 125 cycles."
+        "see docs/reproduction-log.md). Across 5 different engine splits its "
+        "RMSE is 16.1 ± 1.1 and it beat the Random Forest (about 19.0) on every "
+        "split. Random Forest serves rows with no usable history. RUL capped at "
+        "125 cycles."
     )
 else:
     st.caption(

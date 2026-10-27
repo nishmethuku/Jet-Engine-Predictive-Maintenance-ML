@@ -596,6 +596,53 @@ came close to flipping.
 > that prints `OK`/`DIFF` per model against the values published here — so verifying this
 > README takes no manual comparison. Full logs: **[docs/reproduction-log.md](docs/reproduction-log.md)**.
 
+### Robustness checks
+
+The table above comes from one engine split (seed 42). With only 25 test engines, a different
+split can move RMSE by a couple of cycles, so one split cannot separate a real margin from luck.
+Two further checks were added, both reproducible with [`scripts/evaluate_seeds.py`](scripts/evaluate_seeds.py).
+
+#### Five seeds, five different splits
+
+Each seed changes both the engine split and the LSTM initialization. Mean ± standard deviation
+over seeds 42 to 46, on the same shared test points as above:
+
+| Model | RMSE ↓ | MAE ↓ | R² ↑ | C-MAPSS ↓ |
+|---|---:|---:|---:|---:|
+| Linear Regression | 21.23 ± 1.00 | 16.75 ± 1.00 | 0.741 ± 0.023 | 38,884 ± 4,469 |
+| Random Forest | 18.97 ± 0.74 | 14.17 ± 0.78 | 0.793 ± 0.016 | 50,664 ± 10,976 |
+| **LSTM** | **16.11 ± 1.10** | **11.70 ± 0.63** | **0.850 ± 0.021** | **31,436 ± 11,436** |
+
+- **The LSTM's lead is real.** It beat the Random Forest on RMSE in **5 of 5** splits (mean margin
+  2.86 cycles, worst 2.03) and beat Linear Regression in **5 of 5** (mean margin 5.12, worst 3.03).
+- **The split matters more than the hardware.** RMSE varies by about ±1.1 across splits, versus ±0.35
+  across the three machines in the reproduction log. Single-split numbers should be read with that
+  spread in mind.
+- **One earlier claim needs a caveat.** The LSTM had the best C-MAPSS score against the Random Forest
+  in 5 of 5 splits, but against Linear Regression in only 4 of 5 (on seed 45 it scored 48,649 versus
+  Linear's 42,175). The safety-score advantage holds on average and against the forest, but not on
+  every split.
+- Seed 42 reproduces the Linear and Random Forest rows exactly (20.55 and 18.69). The LSTM row on this
+  run was 15.17, below the 15.93 to 16.59 seen on the earlier machines, which is the same
+  non-reproducibility across environments described above.
+
+#### Scoring one point per engine
+
+The official C-MAPSS benchmark scores each test engine only at its last visible cycle, while this
+project scores every cycle. Only full run-to-failure trajectories are available here, so the script
+imitates the official protocol: it draws one random test cycle per engine, scores those points, and
+averages over 200 draws. This approximates the official test, it is not identical to it, so these
+numbers should not be compared directly with published leaderboard values.
+
+| Model | RMSE ↓ | C-MAPSS score per engine ↓ |
+|---|---:|---:|
+| Linear Regression | 21.48 ± 0.79 | 9.92 ± 1.83 |
+| Random Forest | 19.19 ± 0.79 | 13.17 ± 4.07 |
+| **LSTM** | **16.59 ± 1.31** | **8.65 ± 3.59** |
+
+The ordering matches the all-points result, so the conclusion does not depend on how the cycles
+are sampled.
+
 ### The Random Forest in detail
 The three figures below profile the Round-2 Random Forest. In the **deployed dashboard** it
 serves single-snapshot inputs (manual entry, CSVs without engine ids) and backs up the LSTM;
@@ -788,9 +835,10 @@ Jet-Engine-Predictive-Maintenance-ML/
 
 ## 🔭 Limitations & Future Work
 
-- **Metric scope.** We report error over *all* cycles; the official C-MAPSS benchmark
-  scores only the last cycle of each test engine. Our numbers are an honest internal
-  metric, not directly comparable to leaderboard RMSE.
+- **Metric scope.** The headline numbers are error over *all* cycles; the official C-MAPSS
+  benchmark scores only the last cycle of each test engine. [Robustness checks](#robustness-checks)
+  adds a one-random-point-per-engine approximation of that protocol, but it is still not the
+  official test set, so none of these numbers are directly comparable to leaderboard RMSE.
 - **Single operating condition.** FD001 is the simplest C-MAPSS subset (one condition,
   one fault mode). FD002–FD004 add operating regimes and fault modes.
 - **The LSTM is converged, so easy gains are gone.** Round 5 showed more epochs and
@@ -804,9 +852,10 @@ Jet-Engine-Predictive-Maintenance-ML/
 - **Not bit-reproducible across machines.** LSTM RMSE varied 15.93–16.59 over three
   environments. The conclusion is stable; the exact decimal is not. See
   [the reproduction log](docs/reproduction-log.md).
-- **One seed.** All results use `random_state=42`, chosen before any modelling and never
-  changed. A fuller evaluation would report mean ± std over 3–5 **seeds** (not just three
-  machines) to separate a real margin from split luck. We have not run that.
+- **Five splits, not fifty.** The headline table uses `random_state=42`, chosen before any
+  modelling and never changed. [Robustness checks](#robustness-checks) repeats the comparison over
+  five seeds and the LSTM wins every time, but five splits of 25 test engines each is still a small
+  sample, and the standard deviations quoted there are estimates built on it.
 - **The scaler saw the test engines.** The dataset arrived pre-scaled using statistics from all
   100 engines — mild preprocessing leakage. It leaks no labels and affects all four models
   equally, so the comparison stands, but absolute errors may be marginally optimistic. Full
