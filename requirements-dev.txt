@@ -1,0 +1,8 @@
+# Everything needed to run the app, the tests and the figure scripts.
+#   pip install -r requirements-dev.txt
+#   python -m pytest -q
+
+-r requirements.txt
+
+pytest
+matplotlib

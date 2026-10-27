@@ -597,8 +597,9 @@ came close to flipping.
 > README takes no manual comparison. Full logs: **[docs/reproduction-log.md](docs/reproduction-log.md)**.
 
 ### The Random Forest in detail
-The three figures below profile the Round-2 Random Forest, which remains the model the
-**deployed dashboard** currently serves.
+The three figures below profile the Round-2 Random Forest. In the **deployed dashboard** it
+serves single-snapshot inputs (manual entry, CSVs without engine ids) and backs up the LSTM;
+every prediction that has engine history goes to the LSTM.
 
 > **Note on two different RF numbers.** `save_model.py` reports RF at **RMSE 18.0** over
 > *all* test cycles; the comparison table above reports **18.69** because it scores only
@@ -662,7 +663,7 @@ app never hard-crashes on the user.
 
 ### Setup
 ```bash
-git clone https://github.com/William-franklyn/Jet-Engine-Predictive-Maintenance-ML.git
+git clone https://github.com/nishmethuku/Jet-Engine-Predictive-Maintenance-ML.git
 cd Jet-Engine-Predictive-Maintenance-ML
 pip install -r requirements.txt
 ```
@@ -715,6 +716,20 @@ python kaggle_reproduce.py
 
 Either prints a **reproduction check** comparing what you got against what this README claims.
 
+### Run the tests
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+### Go beyond one split
+```bash
+python scripts/evaluate_seeds.py      # 5 seeds: mean ± std, plus the truncated-point metric
+python scripts/lstm_sweep.py          # window / hidden size / depth / dropout sweep
+```
+Both write CSVs to `docs/` and print the tables used in [Robustness checks](#robustness-checks).
+Add `--max-epochs 100` to either one to cap training time on a slow machine.
+
 ---
 
 ## 🗂️ Project Structure
@@ -722,8 +737,7 @@ Either prints a **reproduction check** comparing what you got against what this 
 ```
 Jet-Engine-Predictive-Maintenance-ML/
 ├── app.py                          # Streamlit dashboard (3 modes)
-├── model.py                        # predict_rul(), feature list, model loader
-├── model.py                        # predict_rul(), predict_rul_sequence(), loaders
+├── model.py                        # predict_rul(), predict_rul_sequences(), loaders, input checks
 ├── save_model.py                   # Round 2 — trains + saves the RF; train_full_model()
 ├── logistic_regression_base.py     # Round 1 — logistic vs linear on the same split
 ├── lstm_model.py                   # Round 4 — PyTorch LSTM + sequence windowing
@@ -733,17 +747,24 @@ Jet-Engine-Predictive-Maintenance-ML/
 ├── kaggle_reproduce.py             # self-contained one-file reproduction script
 ├── scripts/
 │   ├── audit_data.py               # data integrity / bias audit (exits 1 on failure)
+│   ├── evaluate_seeds.py           # multi-seed evaluation + truncated-point metric
+│   ├── lstm_sweep.py               # LSTM window / size / depth / dropout sweep
+│   ├── _eval_utils.py              # shared split + metric helpers for the two above
 │   ├── generate_figures.py         # regenerates the EDA / Random Forest figures
 │   └── generate_model_comparison.py# regenerates the model-selection figures
+├── tests/
+│   └── test_pipeline.py            # windowing, predictor agreement, checkpoint, scoring
 ├── docs/
 │   ├── reproduction-log.md         # all three environments, raw output
 │   ├── images/                     # generated charts + dashboard screenshots
 │   ├── model_comparison_*.csv      # measured results (written by compare_models.py)
+│   ├── seed_evaluation*.csv        # per-seed and summary results (evaluate_seeds.py)
+│   ├── lstm_sweep.csv              # architecture sweep results (lstm_sweep.py)
 │   └── lstm_training_curve.csv     # LSTM learning curve, logged per epoch
 ├── nasa_cmapss_FD001_scaled.csv    # the dataset (single source of truth)
 ├── requirements.txt                # all deps, incl. CPU-only torch
-├── README.md
-└── CLAUDE.md                       # engineering notes / conventions
+├── requirements-dev.txt            # adds pytest + matplotlib for tests and figures
+└── README.md
 ```
 
 ---

@@ -57,12 +57,39 @@ def predict_rul(rows: pd.DataFrame, model=None) -> np.ndarray:
 
 LSTM_SEQ_LEN = 30
 
+# The dataset (and therefore the files people export from it) names the id
+# columns unit_number / time_in_cycles; the app works with unit / cycle. Accept
+# both spellings so uploading the repo's own CSV takes the LSTM path.
+COLUMN_ALIASES = {"unit_number": "unit", "time_in_cycles": "cycle"}
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename unit_number/time_in_cycles to unit/cycle (no-op if already so)."""
+    return df.rename(columns={k: v for k, v in COLUMN_ALIASES.items()
+                              if k in df.columns and v not in df.columns})
+
+
+def looks_unscaled(rows: pd.DataFrame, threshold: float = 10.0) -> list:
+    """Feature columns whose typical magnitude is far outside a z-score range.
+
+    The models were trained on z-scored inputs (|value| is almost always < 8),
+    so a column with a median absolute value above `threshold` is almost
+    certainly raw physical units. Returned so the UI can warn instead of
+    silently returning a meaningless prediction.
+    """
+    cols = [c for c in FEATURE_COLS if c in rows.columns]
+    med = rows[cols].apply(pd.to_numeric, errors="coerce").abs().median()
+    return [c for c in cols if med[c] > threshold]
+
 
 def load_lstm():
     """Load the deployed LSTM, or None if torch/the checkpoint isn't available.
 
     torch is an optional dependency: a deployment without it should fall back
     to the Random Forest rather than fail to start.
+
+    The checkpoint holds only tensors and plain numbers, so it is loaded with
+    weights_only=True, which refuses to unpickle arbitrary Python objects.
     """
     if not os.path.exists(LSTM_MODEL_PATH):
         return None
@@ -70,8 +97,12 @@ def load_lstm():
         import torch
         from lstm_model import LSTMRegressor
 
-        blob = torch.load(LSTM_MODEL_PATH, map_location="cpu", weights_only=False)
-        model = LSTMRegressor(n_features=blob["n_features"])
+        blob = torch.load(LSTM_MODEL_PATH, map_location="cpu", weights_only=True)
+        model = LSTMRegressor(
+            n_features=blob["n_features"],
+            hidden_size=blob.get("hidden_size", 64),
+            num_layers=blob.get("num_layers", 2),
+        )
         model.load_state_dict(blob["state_dict"])
         model.eval()
         return model
@@ -100,3 +131,45 @@ def predict_rul_sequence(history: pd.DataFrame, lstm, seq_len=LSTM_SEQ_LEN):
     with torch.no_grad():
         pred = lstm(torch.from_numpy(feats[None, ...])).item()
     return float(np.clip(pred, 0, RUL_CAP))
+
+
+def predict_rul_sequences(df: pd.DataFrame, lstm, seq_len=LSTM_SEQ_LEN,
+                          unit_col="unit", cycle_col="cycle", batch_size=2048):
+    """Predict RUL at EVERY row of `df` from that engine's preceding cycles.
+
+    The batched equivalent of calling predict_rul_sequence() once per row: all
+    windows are built up front and pushed through the LSTM in chunks, which is
+    far faster for a whole uploaded CSV or a whole engine's life. Window
+    construction (including left-padding young engines with their first
+    reading) matches training and predict_rul_sequence() exactly.
+
+    Returns a float array aligned with df's row order, or None if the LSTM is
+    unavailable so callers can fall back.
+    """
+    if lstm is None or df.empty:
+        return None
+    import torch
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    positions = np.arange(len(df))
+    windows, order = [], []
+    for _, grp in df.assign(_pos=positions).groupby(unit_col, sort=False):
+        grp = grp.sort_values(cycle_col)
+        feats = grp[FEATURE_COLS].to_numpy(dtype=np.float32)
+        pad = np.repeat(feats[:1], seq_len - 1, axis=0)
+        padded = np.concatenate([pad, feats], axis=0)
+        # shape (n, F, seq_len) -> (n, seq_len, F)
+        win = sliding_window_view(padded, seq_len, axis=0).transpose(0, 2, 1)
+        windows.append(win)
+        order.append(grp["_pos"].to_numpy())
+
+    X = np.ascontiguousarray(np.concatenate(windows, axis=0))
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(X), batch_size):
+            out.append(lstm(torch.from_numpy(X[i:i + batch_size])).numpy())
+    preds = np.clip(np.concatenate(out), 0, RUL_CAP)
+
+    result = np.empty(len(df), dtype=np.float64)
+    result[np.concatenate(order)] = preds
+    return result

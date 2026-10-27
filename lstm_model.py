@@ -116,8 +116,12 @@ class LSTMRegressor(nn.Module):
 
 
 def train_lstm(X_tr, y_tr, X_val, y_val, epochs=EPOCHS, batch_size=BATCH_SIZE,
-               lr=LEARNING_RATE, patience=PATIENCE, seed=SEED, verbose=True):
+               lr=LEARNING_RATE, patience=PATIENCE, seed=SEED, verbose=True,
+               hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, dropout=DROPOUT):
     """Train with MSE + Adam, early-stopping on validation RMSE.
+
+    The architecture arguments default to the module constants, so existing
+    callers behave exactly as before; scripts/lstm_sweep.py overrides them.
 
     Returns (model, history):
       model    best validation weights restored, so a lucky final epoch can't
@@ -128,7 +132,8 @@ def train_lstm(X_tr, y_tr, X_val, y_val, epochs=EPOCHS, batch_size=BATCH_SIZE,
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    model = LSTMRegressor(n_features=X_tr.shape[2])
+    model = LSTMRegressor(n_features=X_tr.shape[2], hidden_size=hidden_size,
+                          num_layers=num_layers, dropout=dropout)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, factor=LR_FACTOR, patience=LR_PATIENCE, min_lr=MIN_LR,
