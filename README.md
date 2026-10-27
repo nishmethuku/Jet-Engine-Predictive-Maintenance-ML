@@ -643,6 +643,40 @@ numbers should not be compared directly with published leaderboard values.
 The ordering matches the all-points result, so the conclusion does not depend on how the cycles
 are sampled.
 
+#### LSTM architecture sweep
+
+[`scripts/lstm_sweep.py`](scripts/lstm_sweep.py) changes one setting at a time around the deployed
+configuration (window 30, hidden 64, 2 layers, dropout 0.2), on the seed-42 split. Every
+configuration is scored on the same test points (cycles 50 and later, so a longer window cannot
+win by skipping hard early cycles) and is picked by validation error, not test error. Because the
+test points start at cycle 50 instead of 30, the absolute numbers here are lower than the headline
+table and should only be compared with each other.
+
+| Change | Test RMSE ↓ | Test MAE ↓ | Test R² ↑ | RMSE vs deployed |
+|---|---:|---:|---:|---:|
+| **Deployed (window 30, hidden 64, 2 layers, dropout 0.2)** | **15.29** | 11.69 | 0.86 | n/a |
+| Window 20 | 17.99 | 13.24 | 0.81 | +2.70 |
+| Window 40 | 15.19 | 11.46 | 0.86 | −0.10 |
+| Window 50 | 15.22 | 10.40 | 0.86 | −0.07 |
+| Hidden size 32 | 15.75 | 11.40 | 0.85 | +0.46 |
+| Hidden size 128 | 16.02 | 11.62 | 0.85 | +0.73 |
+| 1 layer | 16.34 | 11.68 | 0.84 | +1.05 |
+| 3 layers | 17.56 | 12.73 | 0.82 | +2.27 |
+| Dropout 0.0 | 16.51 | 11.53 | 0.84 | +1.22 |
+| Dropout 0.4 | 16.10 | 12.16 | 0.85 | +0.81 |
+
+- **No variant clearly beats the deployed configuration.** The best by validation error was window 50,
+  and its test RMSE is 0.07 lower, far inside the roughly ±1 spread between seeds measured above.
+  Windows of 40 and 50 are a statistical tie with 30.
+- **Two changes clearly hurt.** A 20-cycle window loses about 2.7 RMSE, which fits the mechanism in
+  this README: the model reads the degradation trend, and a shorter window shows less of it. A third
+  layer loses about 2.3, a sign that more depth overfits a dataset with only 100 engines.
+- **The deployed configuration sits on a plateau**, so it was left unchanged and the shipped
+  checkpoint was not retrained.
+- Each configuration is one training run, so gaps under about one RMSE point are not evidence. In
+  the 1-layer run, PyTorch ignores the dropout between layers (there is only one), so only the
+  dropout before the output layer applies.
+
 ### The Random Forest in detail
 The three figures below profile the Round-2 Random Forest. In the **deployed dashboard** it
 serves single-snapshot inputs (manual entry, CSVs without engine ids) and backs up the LSTM;
@@ -842,9 +876,10 @@ Jet-Engine-Predictive-Maintenance-ML/
 - **Single operating condition.** FD001 is the simplest C-MAPSS subset (one condition,
   one fault mode). FD002–FD004 add operating regimes and fault modes.
 - **The LSTM is converged, so easy gains are gone.** Round 5 showed more epochs and
-  learning-rate decay buy nothing. Further improvement needs a **different architecture or
-  window length** — a hyperparameter sweep over window size, hidden units and layer count
-  is the honest next step, and we have not run one.
+  learning-rate decay buy nothing. The follow-up sweep in [Robustness checks](#robustness-checks)
+  tried other window lengths, hidden sizes, depths and dropout rates, and none beat the
+  deployed configuration by more than seed noise. Real gains would need something different
+  in kind, such as new features, a different architecture family, or more varied data (FD002 to FD004).
 - **Sequence models can't cold-start.** The LSTM needs 30 cycles of history before it can
   predict properly, so a brand-new engine — or a single hand-entered reading — still falls
   back to the Random Forest. The dashboard runs **both** for this reason, but it does mean
