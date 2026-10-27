@@ -596,9 +596,91 @@ came close to flipping.
 > that prints `OK`/`DIFF` per model against the values published here — so verifying this
 > README takes no manual comparison. Full logs: **[docs/reproduction-log.md](docs/reproduction-log.md)**.
 
+### Robustness checks
+
+The table above comes from one engine split (seed 42). With only 25 test engines, a different
+split can move RMSE by a couple of cycles, so one split cannot separate a real margin from luck.
+Two further checks were added, both reproducible with [`scripts/evaluate_seeds.py`](scripts/evaluate_seeds.py).
+
+#### Five seeds, five different splits
+
+Each seed changes both the engine split and the LSTM initialization. Mean ± standard deviation
+over seeds 42 to 46, on the same shared test points as above:
+
+| Model | RMSE ↓ | MAE ↓ | R² ↑ | C-MAPSS ↓ |
+|---|---:|---:|---:|---:|
+| Linear Regression | 21.23 ± 1.00 | 16.75 ± 1.00 | 0.741 ± 0.023 | 38,884 ± 4,469 |
+| Random Forest | 18.97 ± 0.74 | 14.17 ± 0.78 | 0.793 ± 0.016 | 50,664 ± 10,976 |
+| **LSTM** | **16.11 ± 1.10** | **11.70 ± 0.63** | **0.850 ± 0.021** | **31,436 ± 11,436** |
+
+- **The LSTM's lead is real.** It beat the Random Forest on RMSE in **5 of 5** splits (mean margin
+  2.86 cycles, worst 2.03) and beat Linear Regression in **5 of 5** (mean margin 5.12, worst 3.03).
+- **The split matters more than the hardware.** RMSE varies by about ±1.1 across splits, versus ±0.35
+  across the three machines in the reproduction log. Single-split numbers should be read with that
+  spread in mind.
+- **One earlier claim needs a caveat.** The LSTM had the best C-MAPSS score against the Random Forest
+  in 5 of 5 splits, but against Linear Regression in only 4 of 5 (on seed 45 it scored 48,649 versus
+  Linear's 42,175). The safety-score advantage holds on average and against the forest, but not on
+  every split.
+- Seed 42 reproduces the Linear and Random Forest rows exactly (20.55 and 18.69). The LSTM row on this
+  run was 15.17, below the 15.93 to 16.59 seen on the earlier machines, which is the same
+  non-reproducibility across environments described above.
+
+#### Scoring one point per engine
+
+The official C-MAPSS benchmark scores each test engine only at its last visible cycle, while this
+project scores every cycle. Only full run-to-failure trajectories are available here, so the script
+imitates the official protocol: it draws one random test cycle per engine, scores those points, and
+averages over 200 draws. This approximates the official test, it is not identical to it, so these
+numbers should not be compared directly with published leaderboard values.
+
+| Model | RMSE ↓ | C-MAPSS score per engine ↓ |
+|---|---:|---:|
+| Linear Regression | 21.48 ± 0.79 | 9.92 ± 1.83 |
+| Random Forest | 19.19 ± 0.79 | 13.17 ± 4.07 |
+| **LSTM** | **16.59 ± 1.31** | **8.65 ± 3.59** |
+
+The ordering matches the all-points result, so the conclusion does not depend on how the cycles
+are sampled.
+
+#### LSTM architecture sweep
+
+[`scripts/lstm_sweep.py`](scripts/lstm_sweep.py) changes one setting at a time around the deployed
+configuration (window 30, hidden 64, 2 layers, dropout 0.2), on the seed-42 split. Every
+configuration is scored on the same test points (cycles 50 and later, so a longer window cannot
+win by skipping hard early cycles) and is picked by validation error, not test error. Because the
+test points start at cycle 50 instead of 30, the absolute numbers here are lower than the headline
+table and should only be compared with each other.
+
+| Change | Test RMSE ↓ | Test MAE ↓ | Test R² ↑ | RMSE vs deployed |
+|---|---:|---:|---:|---:|
+| **Deployed (window 30, hidden 64, 2 layers, dropout 0.2)** | **15.29** | 11.69 | 0.86 | n/a |
+| Window 20 | 17.99 | 13.24 | 0.81 | +2.70 |
+| Window 40 | 15.19 | 11.46 | 0.86 | −0.10 |
+| Window 50 | 15.22 | 10.40 | 0.86 | −0.07 |
+| Hidden size 32 | 15.75 | 11.40 | 0.85 | +0.46 |
+| Hidden size 128 | 16.02 | 11.62 | 0.85 | +0.73 |
+| 1 layer | 16.34 | 11.68 | 0.84 | +1.05 |
+| 3 layers | 17.56 | 12.73 | 0.82 | +2.27 |
+| Dropout 0.0 | 16.51 | 11.53 | 0.84 | +1.22 |
+| Dropout 0.4 | 16.10 | 12.16 | 0.85 | +0.81 |
+
+- **No variant clearly beats the deployed configuration.** The best by validation error was window 50,
+  and its test RMSE is 0.07 lower, far inside the roughly ±1 spread between seeds measured above.
+  Windows of 40 and 50 are a statistical tie with 30.
+- **Two changes clearly hurt.** A 20-cycle window loses about 2.7 RMSE, which fits the mechanism in
+  this README: the model reads the degradation trend, and a shorter window shows less of it. A third
+  layer loses about 2.3, a sign that more depth overfits a dataset with only 100 engines.
+- **The deployed configuration sits on a plateau**, so it was left unchanged and the shipped
+  checkpoint was not retrained.
+- Each configuration is one training run, so gaps under about one RMSE point are not evidence. In
+  the 1-layer run, PyTorch ignores the dropout between layers (there is only one), so only the
+  dropout before the output layer applies.
+
 ### The Random Forest in detail
-The three figures below profile the Round-2 Random Forest, which remains the model the
-**deployed dashboard** currently serves.
+The three figures below profile the Round-2 Random Forest. In the **deployed dashboard** it
+serves single-snapshot inputs (manual entry, CSVs without engine ids) and backs up the LSTM;
+every prediction that has engine history goes to the LSTM.
 
 > **Note on two different RF numbers.** `save_model.py` reports RF at **RMSE 18.0** over
 > *all* test cycles; the comparison table above reports **18.69** because it scores only
@@ -662,7 +744,7 @@ app never hard-crashes on the user.
 
 ### Setup
 ```bash
-git clone https://github.com/William-franklyn/Jet-Engine-Predictive-Maintenance-ML.git
+git clone https://github.com/nishmethuku/Jet-Engine-Predictive-Maintenance-ML.git
 cd Jet-Engine-Predictive-Maintenance-ML
 pip install -r requirements.txt
 ```
@@ -715,6 +797,20 @@ python kaggle_reproduce.py
 
 Either prints a **reproduction check** comparing what you got against what this README claims.
 
+### Run the tests
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+### Go beyond one split
+```bash
+python scripts/evaluate_seeds.py      # 5 seeds: mean ± std, plus the truncated-point metric
+python scripts/lstm_sweep.py          # window / hidden size / depth / dropout sweep
+```
+Both write CSVs to `docs/` and print the tables used in [Robustness checks](#robustness-checks).
+Add `--max-epochs 100` to either one to cap training time on a slow machine.
+
 ---
 
 ## 🗂️ Project Structure
@@ -722,8 +818,7 @@ Either prints a **reproduction check** comparing what you got against what this 
 ```
 Jet-Engine-Predictive-Maintenance-ML/
 ├── app.py                          # Streamlit dashboard (3 modes)
-├── model.py                        # predict_rul(), feature list, model loader
-├── model.py                        # predict_rul(), predict_rul_sequence(), loaders
+├── model.py                        # predict_rul(), predict_rul_sequences(), loaders, input checks
 ├── save_model.py                   # Round 2 — trains + saves the RF; train_full_model()
 ├── logistic_regression_base.py     # Round 1 — logistic vs linear on the same split
 ├── lstm_model.py                   # Round 4 — PyTorch LSTM + sequence windowing
@@ -733,17 +828,24 @@ Jet-Engine-Predictive-Maintenance-ML/
 ├── kaggle_reproduce.py             # self-contained one-file reproduction script
 ├── scripts/
 │   ├── audit_data.py               # data integrity / bias audit (exits 1 on failure)
+│   ├── evaluate_seeds.py           # multi-seed evaluation + truncated-point metric
+│   ├── lstm_sweep.py               # LSTM window / size / depth / dropout sweep
+│   ├── _eval_utils.py              # shared split + metric helpers for the two above
 │   ├── generate_figures.py         # regenerates the EDA / Random Forest figures
 │   └── generate_model_comparison.py# regenerates the model-selection figures
+├── tests/
+│   └── test_pipeline.py            # windowing, predictor agreement, checkpoint, scoring
 ├── docs/
 │   ├── reproduction-log.md         # all three environments, raw output
 │   ├── images/                     # generated charts + dashboard screenshots
 │   ├── model_comparison_*.csv      # measured results (written by compare_models.py)
+│   ├── seed_evaluation*.csv        # per-seed and summary results (evaluate_seeds.py)
+│   ├── lstm_sweep.csv              # architecture sweep results (lstm_sweep.py)
 │   └── lstm_training_curve.csv     # LSTM learning curve, logged per epoch
 ├── nasa_cmapss_FD001_scaled.csv    # the dataset (single source of truth)
 ├── requirements.txt                # all deps, incl. CPU-only torch
-├── README.md
-└── CLAUDE.md                       # engineering notes / conventions
+├── requirements-dev.txt            # adds pytest + matplotlib for tests and figures
+└── README.md
 ```
 
 ---
@@ -767,15 +869,17 @@ Jet-Engine-Predictive-Maintenance-ML/
 
 ## 🔭 Limitations & Future Work
 
-- **Metric scope.** We report error over *all* cycles; the official C-MAPSS benchmark
-  scores only the last cycle of each test engine. Our numbers are an honest internal
-  metric, not directly comparable to leaderboard RMSE.
+- **Metric scope.** The headline numbers are error over *all* cycles; the official C-MAPSS
+  benchmark scores only the last cycle of each test engine. [Robustness checks](#robustness-checks)
+  adds a one-random-point-per-engine approximation of that protocol, but it is still not the
+  official test set, so none of these numbers are directly comparable to leaderboard RMSE.
 - **Single operating condition.** FD001 is the simplest C-MAPSS subset (one condition,
   one fault mode). FD002–FD004 add operating regimes and fault modes.
 - **The LSTM is converged, so easy gains are gone.** Round 5 showed more epochs and
-  learning-rate decay buy nothing. Further improvement needs a **different architecture or
-  window length** — a hyperparameter sweep over window size, hidden units and layer count
-  is the honest next step, and we have not run one.
+  learning-rate decay buy nothing. The follow-up sweep in [Robustness checks](#robustness-checks)
+  tried other window lengths, hidden sizes, depths and dropout rates, and none beat the
+  deployed configuration by more than seed noise. Real gains would need something different
+  in kind, such as new features, a different architecture family, or more varied data (FD002 to FD004).
 - **Sequence models can't cold-start.** The LSTM needs 30 cycles of history before it can
   predict properly, so a brand-new engine — or a single hand-entered reading — still falls
   back to the Random Forest. The dashboard runs **both** for this reason, but it does mean
@@ -783,9 +887,10 @@ Jet-Engine-Predictive-Maintenance-ML/
 - **Not bit-reproducible across machines.** LSTM RMSE varied 15.93–16.59 over three
   environments. The conclusion is stable; the exact decimal is not. See
   [the reproduction log](docs/reproduction-log.md).
-- **One seed.** All results use `random_state=42`, chosen before any modelling and never
-  changed. A fuller evaluation would report mean ± std over 3–5 **seeds** (not just three
-  machines) to separate a real margin from split luck. We have not run that.
+- **Five splits, not fifty.** The headline table uses `random_state=42`, chosen before any
+  modelling and never changed. [Robustness checks](#robustness-checks) repeats the comparison over
+  five seeds and the LSTM wins every time, but five splits of 25 test engines each is still a small
+  sample, and the standard deviations quoted there are estimates built on it.
 - **The scaler saw the test engines.** The dataset arrived pre-scaled using statistics from all
   100 engines — mild preprocessing leakage. It leaks no labels and affects all four models
   equally, so the comparison stands, but absolute errors may be marginally optimistic. Full

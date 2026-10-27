@@ -17,7 +17,8 @@ import streamlit as st
 
 from model import (
     FEATURE_COLS, LSTM_SEQ_LEN, RUL_CAP,
-    load_lstm, load_model, predict_rul, predict_rul_sequence,
+    load_lstm, load_model, looks_unscaled, normalize_columns, predict_rul,
+    predict_rul_sequence, predict_rul_sequences,
 )
 
 DATA_PATH = "nasa_cmapss_FD001_scaled.csv"
@@ -62,6 +63,25 @@ def load_dataset():
     # The CSV ships raw RUL; apply the same 125-cycle cap the model trains on.
     data["RUL"] = data["RUL"].clip(upper=RUL_CAP)
     return data
+
+
+@st.cache_data
+def engine_life_predictions(engine_id, _lstm):
+    """LSTM prediction at every cycle of one engine (cached per engine).
+
+    `_lstm` has a leading underscore so Streamlit does not try to hash the
+    model object; the cache key is just the engine id.
+    """
+    life = dataset[dataset["unit"] == engine_id].sort_values("cycle")
+    return life["cycle"].to_numpy(), predict_rul_sequences(life, _lstm)
+
+
+def example_csv():
+    """Two engines' first 60 cycles, in the exact format the uploader expects."""
+    if dataset is None:
+        return None
+    sample = dataset[dataset["unit"].isin([1, 2]) & (dataset["cycle"] <= 60)]
+    return sample[["unit", "cycle"] + FEATURE_COLS].to_csv(index=False).encode("utf-8")
 
 
 model = get_model()
@@ -139,6 +159,20 @@ if mode == "Browse engine":
                 + "."
             )
 
+        if lstm is not None:
+            st.subheader("Predicted vs true RUL over this engine's life")
+            cycles, life_pred = engine_life_predictions(selected_engine, lstm)
+            life_chart = pd.DataFrame({
+                "True RUL (capped at 125)": engine_df["RUL"].to_numpy(),
+                "LSTM prediction": life_pred,
+            }, index=pd.Index(cycles, name="cycle"))
+            st.line_chart(life_chart)
+            st.caption(
+                "The deployed LSTM was trained on all 100 engines, including this "
+                "one, so the fit here looks better than it would on a brand-new "
+                "engine. Held-out accuracy is in the footer and the README."
+            )
+
         st.subheader("Sensor readings")
         sensor_cols = [c for c in FEATURE_COLS if c.startswith("sensor_")]
         chosen_sensors = st.multiselect(
@@ -154,37 +188,71 @@ elif mode == "Upload CSV":
     st.caption(
         "CSV must be pre-scaled (z-score standardized) with columns: "
         + ", ".join(FEATURE_COLS)
+        + ". Add `unit` and `cycle` columns (`unit_number` and `time_in_cycles` "
+        "also work) to get LSTM predictions."
     )
+    sample = example_csv()
+    if sample is not None:
+        st.download_button(
+            "Download an example CSV", sample, "example_engines.csv", "text/csv"
+        )
     uploaded = st.file_uploader("Choose a CSV file", type="csv")
     if uploaded:
-        upload_df = pd.read_csv(uploaded)
+        upload_df = normalize_columns(pd.read_csv(uploaded))
         st.write("Preview:", upload_df.head())
 
         missing = [c for c in FEATURE_COLS if c not in upload_df.columns]
         if missing:
             st.error(f"Missing columns: {missing}")
         else:
+            feats = upload_df[FEATURE_COLS].apply(pd.to_numeric, errors="coerce")
+            bad_rows = int(feats.isna().any(axis=1).sum())
+            if bad_rows:
+                st.error(
+                    f"{bad_rows} row(s) have blank or non-numeric values in the "
+                    "feature columns. Fix or remove them and upload again."
+                )
+                st.stop()
+            upload_df[FEATURE_COLS] = feats
+
+            unscaled = looks_unscaled(upload_df)
+            if unscaled:
+                st.warning(
+                    "These columns look like raw sensor units, not z-scores: "
+                    + ", ".join(unscaled)
+                    + ". The models expect standardized inputs, so predictions "
+                    "for this file will not be meaningful."
+                )
+
             # The LSTM needs to know which rows belong to which engine and in
             # what order. With unit+cycle columns we can rebuild each row's
             # history and use it; without them, every row is an isolated
             # snapshot and only the Random Forest can score it.
             has_sequence = {"unit", "cycle"}.issubset(upload_df.columns)
 
+            lstm_preds = None
             if lstm is not None and has_sequence:
-                upload_df = upload_df.sort_values(["unit", "cycle"]).reset_index(drop=True)
-                preds, used_lstm = [], 0
                 with st.spinner("Running the LSTM over each engine's history…"):
-                    for unit, grp in upload_df.groupby("unit", sort=False):
-                        for i in range(len(grp)):
-                            p = predict_rul_sequence(grp.iloc[: i + 1], lstm)
-                            preds.append(p)
-                            used_lstm += 1
-                upload_df["Predicted RUL"] = np.round(preds, 1)
+                    lstm_preds = predict_rul_sequences(upload_df, lstm)
+
+            if lstm_preds is not None:
+                upload_df["Predicted RUL"] = np.round(lstm_preds, 1)
                 upload_df["Model"] = "LSTM"
+                upload_df = upload_df.sort_values(["unit", "cycle"]).reset_index(drop=True)
+                short = int(
+                    (upload_df.groupby("unit").cumcount() + 1 < LSTM_SEQ_LEN).sum()
+                )
                 st.success(
                     f"Predictions complete — **LSTM** used for all "
-                    f"{used_lstm:,} rows, reading each engine's history."
+                    f"{len(upload_df):,} rows, reading each engine's history."
                 )
+                if short:
+                    st.info(
+                        f"{short:,} row(s) come from an engine's first "
+                        f"{LSTM_SEQ_LEN - 1} cycles, so their window was padded "
+                        "with the engine's earliest reading. Treat those "
+                        "predictions as rough."
+                    )
             else:
                 upload_df["Predicted RUL"] = predict_rul(upload_df, model)
                 upload_df["Model"] = "Random Forest"
@@ -230,6 +298,14 @@ else:
 
     if st.button("Predict RUL", type="primary"):
         row = pd.DataFrame([inputs])
+        unscaled = looks_unscaled(row, threshold=10.0)
+        if unscaled:
+            st.warning(
+                "These values look like raw sensor units, not z-scores: "
+                + ", ".join(unscaled)
+                + ". The model expects standardized inputs, so this prediction "
+                "will not be meaningful."
+            )
         pred = predict_rul(row, model)[0]
         st.metric("Predicted Remaining Useful Life", f"{pred:.1f} cycles")
         if pred < 30:
@@ -244,8 +320,10 @@ if lstm is not None:
     st.caption(
         "Primary model: **LSTM** over a 30-cycle window — RMSE 16.19 ± 0.35, "
         "MAE 11.59 ± 0.53, R² 0.850 on unseen engines (mean of 3 environments; "
-        "see docs/reproduction-log.md). Random Forest (RMSE 18.69) serves rows "
-        "with no usable history. RUL capped at 125 cycles."
+        "see docs/reproduction-log.md). Across 5 different engine splits its "
+        "RMSE is 16.1 ± 1.1 and it beat the Random Forest (about 19.0) on every "
+        "split. Random Forest serves rows with no usable history. RUL capped at "
+        "125 cycles."
     )
 else:
     st.caption(
